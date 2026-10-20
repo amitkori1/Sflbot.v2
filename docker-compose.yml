@@ -1,0 +1,15 @@
+services:
+  sfl-bot:
+    build: .
+    container_name: sfl-bot
+    restart: unless-stopped
+    env_file: config.env
+    environment:
+      DATA_DIR: /data
+    ports:
+      - "3000:3000"
+    volumes:
+      - sfl_data:/data        # session + notes/filters survive restarts and rebuilds
+
+volumes:
+  sfl_data:
