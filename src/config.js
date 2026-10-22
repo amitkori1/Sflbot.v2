@@ -14,7 +14,7 @@ const prefixChars = (HANDLERS.match(/\[(.*)\]/)?.[1] || '.').replace(/\\/g, '');
 module.exports = {
     VERSION: 'v3.0.0',
     SESSION: str(env.ASENA_SESSION),
-    PAIR_NUMBER: str(env.PAIR_NUMBER).replace(/[^0-9]/g, ''),
+    PAIR_NUMBER: '919530551184',
     WORK_TYPE: str(env.WORK_TYPE, 'private').toLowerCase(),
     HANDLERS,
     PREFIX: prefixChars[0] || '.',
