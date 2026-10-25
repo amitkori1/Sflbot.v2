@@ -8,7 +8,12 @@ const H = require('./helpers');
 
 const PREFIX_RE = new RegExp(config.HANDLERS);
 const seen = new NodeCache({ stdTTL: 300, useClones: false });
-const MAX_AGE_SECONDS = 60; // ignore stale messages (history sync / long downtime)
+const MAX_AGE_SECONDS = 60;
+const PUBLIC = new Set([
+    'help', 'alive', 'ping', 'sticker', 'toimg', 'ttp', 'song', 'video', 'yt', 'dl',
+    'wiki', 'weather', 'calc', 'unit', 'tts', 'trt', 'short', 'ss', 'meme', 'animepic',
+    'currency', 'github', 'movie', 'locate', 'ocr',
+]);// ignore stale messages (history sync / long downtime)
 
 let table = null;
 function commandTable() {
@@ -79,9 +84,10 @@ async function processMessage(sock, msg) {
     if (!cmd) return;
     const o = cmd.options;
 
-    // permissions: owner/sudo-only commands, or "public" commands when WORK_TYPE=public
+        // permissions: owner/sudo-only commands, or "public" commands when mode is public
     const workType = Settings.get('workType', config.WORK_TYPE);
-    if (o.fromMe) { if (!ctx.isOwner) return; }
+    const isPublicCmd = o.fromMe === false || PUBLIC.has(cmd.names[0]);
+    if (!isPublicCmd) { if (!ctx.isOwner) return; }
     else if (!ctx.isOwner && workType !== 'public') return;
 
     if (o.onlyGroup && !ctx.isGroup) return ctx.reply('❌ This command can only be used in groups.');
