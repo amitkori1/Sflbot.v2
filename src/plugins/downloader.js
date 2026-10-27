@@ -19,7 +19,7 @@ function lastLine(s) {
 }
 
 async function ytdlp(args, opts = {}) {
-    const base = ['--no-warnings', '--no-progress', '--ignore-config', '--socket-timeout', '20'];
+    const base = ['--no-warnings', '--no-progress', '--socket-timeout', '20'];   // keep /etc/yt-dlp.conf (Docker: --js-runtimes node)
     if (config.YTDLP_COOKIES) base.push('--cookies', config.YTDLP_COOKIES);
     return H.runCmd(config.YTDLP_PATH, [...base, ...args], { timeout: 6 * 60 * 1000, ...opts });
 }
@@ -38,6 +38,7 @@ async function ensureTools(ctx, needFfmpeg = true) {
 
 /** Download `target` into a temp dir. Returns { file, title, dir }. Caller must rm(dir). */
 async function download(target, args) {
+    if (URL_RE.test(target)) await H.assertPublicUrl(target);      // never let yt-dlp touch the server's own network
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sfl_dl_'));
     try {
         const { stdout } = await ytdlp([
@@ -70,6 +71,29 @@ async function withLimit(ctx, fn) {
         ctx.sock.sendMessage(ctx.jid, { delete: wait.key }).catch(() => {});
     }
 }
+
+// ───────── keep yt-dlp fresh (the Docker image no longer updates it on start) ─────────
+async function updateYtdlp() {
+    if (!await H.hasBinary(config.YTDLP_PATH)) return 'yt-dlp is not installed.';
+    try {
+        const { stdout, stderr } = await H.runCmd(config.YTDLP_PATH, ['-U'], { timeout: 120000 });
+        const out = lastLine(stdout || stderr);
+        const { stdout: v } = await H.runCmd(config.YTDLP_PATH, ['--version'], { timeout: 20000 });
+        return `${out}\nVersion: ${v.trim()}`;
+    } catch (e) {
+        return `Update failed: ${lastLine(e.stderr) || e.message}`;
+    }
+}
+if (String(process.env.YTDLP_AUTOUPDATE || 'true').toLowerCase() !== 'false') {
+    setTimeout(() => updateYtdlp().then(r => console.log('🔧 yt-dlp: ' + r.replace(/\n/g, ' | '))).catch(() => {}), 25000).unref();
+}
+
+addCommand({ pattern: 'ytupdate', desc: 'Update yt-dlp (fixes broken YouTube downloads)' }, async (sock, msg, match, ctx) => {
+    const wait = await ctx.reply('⏳ Updating yt-dlp...');
+    const r = await updateYtdlp();
+    sock.sendMessage(ctx.jid, { delete: wait.key }).catch(() => {});
+    await ctx.reply(`🔧 ${r}`);
+});
 
 addCommand({ pattern: 'song', aliases: ['play'], desc: 'Download a song from YouTube (name or link)', usage: 'song believer imagine dragons' }, async (sock, msg, match, ctx) => {
     if (!match) return ctx.reply('❌ Usage: `.song <name or YouTube link>`');

@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const config = require('./config');
+const store = require('./store');
 
 fs.mkdirSync(config.DATA_DIR, { recursive: true });
 const DB_FILE = path.join(config.DATA_DIR, 'data.json');
@@ -14,6 +15,8 @@ const defaults = () => ({
     greetings: {},   // { jid: { welcome, goodbye } }
     antilink: {},    // { jid: true|false }
     sudo: [],
+    simi: { chats: {}, all: false, lang: {} },   // SimSimi chatbot state
+    blocked: [],                                 // chats where the bot ignores everybody but you
     settings: {},    // { autobio, workType }
 });
 
@@ -33,6 +36,9 @@ function load() {
 }
 
 let timer = null;
+let remoteTimer = null;
+let remoteDirty = false;
+
 function writeNow() {
     try {
         fs.writeFileSync(TMP_FILE, JSON.stringify(db, null, 2));
@@ -41,13 +47,48 @@ function writeNow() {
         console.error('⚠️  Failed to save data.json:', e.message);
     }
 }
-function save() {
-    if (timer) return;
-    timer = setTimeout(() => { timer = null; writeNow(); }, 300);
+
+async function pushRemote() {
+    if (!store.enabled || !remoteDirty) return;
+    remoteDirty = false;
+    try { await store.set('data', JSON.stringify(db)); }
+    catch (e) { remoteDirty = true; console.error('⚠️  Remote data sync failed:', e.message); }
 }
+
+function save() {
+    remoteDirty = true;
+    if (!timer) timer = setTimeout(() => { timer = null; writeNow(); }, 300);
+    if (store.enabled && !remoteTimer) remoteTimer = setTimeout(() => { remoteTimer = null; pushRemote(); }, 8000);
+}
+
+/** Synchronous local flush (used on process exit). */
 function flush() {
     if (timer) { clearTimeout(timer); timer = null; }
     writeNow();
+}
+
+/** Local + remote flush; await this before exiting on SIGTERM / restart. */
+async function flushAsync() {
+    flush();
+    if (remoteTimer) { clearTimeout(remoteTimer); remoteTimer = null; }
+    await Promise.race([pushRemote(), new Promise(r => setTimeout(r, 4000))]);
+}
+
+/** Load data from the remote store (if configured). Call once before starting the bot. */
+async function init() {
+    if (!store.enabled) return;
+    try {
+        const raw = await store.get('data');
+        if (raw) {
+            db = { ...defaults(), ...JSON.parse(raw) };
+            writeNow();
+            console.log('☁️  Data restored from remote storage');
+        } else if (fs.existsSync(DB_FILE)) {
+            remoteDirty = true; pushRemote();   // first run: seed remote with the local file
+        }
+    } catch (e) {
+        console.error('⚠️  Could not load remote data (using local file):', e.message);
+    }
 }
 process.on('exit', () => { if (timer) writeNow(); });
 
@@ -105,4 +146,20 @@ const Settings = {
     set: (key, value) => { db.settings[key] = value; save(); },
 };
 
-module.exports = { Notes, Filters, AFK, Greetings, AntiLink, Sudo, Settings, flush };
+const Simi = {
+    isOn: (jid) => !!db.simi.chats[jid],
+    set: (jid, on) => { if (on) db.simi.chats[jid] = true; else delete db.simi.chats[jid]; save(); },
+    all: () => !!db.simi.all,
+    setAll: (on) => { db.simi.all = !!on; save(); },
+    lang: (jid) => db.simi.lang[jid] || null,
+    setLang: (jid, l) => { if (l) db.simi.lang[jid] = l; else delete db.simi.lang[jid]; save(); },
+};
+
+const Blocked = {
+    has: (jid) => (db.blocked || []).includes(jid),
+    list: () => db.blocked || [],
+    add: (jid) => { if (!db.blocked.includes(jid)) { db.blocked.push(jid); save(); } },
+    remove: (jid) => { db.blocked = db.blocked.filter(j => j !== jid); save(); },
+};
+
+module.exports = { Notes, Filters, AFK, Greetings, AntiLink, Sudo, Settings, Simi, Blocked, init, flush, flushAsync };

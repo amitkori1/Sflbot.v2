@@ -12,9 +12,9 @@ const HANDLERS = str(env.HANDLERS, '^[.!;]');
 const prefixChars = (HANDLERS.match(/\[(.*)\]/)?.[1] || '.').replace(/\\/g, '');
 
 module.exports = {
-    VERSION: 'v3.0.0',
+    VERSION: 'v3.1.0',
     SESSION: str(env.ASENA_SESSION),
-    PAIR_NUMBER: '919530551184',
+    PAIR_NUMBER: str(env.PAIR_NUMBER, '').replace(/[^0-9]/g, ''),
     WORK_TYPE: str(env.WORK_TYPE, 'private').toLowerCase(),
     HANDLERS,
     PREFIX: prefixChars[0] || '.',
@@ -48,10 +48,31 @@ module.exports = {
     UNBLOCK_MESSAGE: str(env.UNBLOCK_MESSAGE, 'default'),
     KICKME_MESSAGE: str(env.KICKME_MESSAGE, 'default'),
 
-    WEATHER_API: str(env.WEATHER_API),
-    OMDB_API_KEY: str(env.OMDB_API_KEY),
-    REMOVE_BG_API_KEY: str(env.REMOVE_BG_API_KEY),
-    OCR_API_KEY: str(env.OCR_API_KEY, 'helloworld'),
+    // ───────── API keys ─────────
+    // Defaults marked (old repo) are the shared keys that shipped inside the old WhatsAsena/sflbot2.1
+    // code. They belong to the original developers, can be rate-limited or revoked at any time, and
+    // were NOT created by you. Put your own key in config.env / Render env vars to override them.
+    WEATHER_API: str(env.WEATHER_API, ''),        // OpenWeatherMap (old repo)
+    OMDB_API_KEY: str(env.OMDB_API_KEY, ''),                              // OMDb (old repo)
+    WITAI_API: str(env.WITAI_API, ''),            // wit.ai speech-to-text (old repo)
+    DEEPAI_API_KEY: str(env.DEEPAI_API_KEY, ''), // DeepAI public demo key
+    REMOVE_BG_API_KEY: str(env.REMOVE_BG_API_KEY),                                // none shipped: get one at remove.bg
+    OCR_API_KEY: str(env.OCR_API_KEY, ''),                              // ocr.space public test key
+
+    // ───────── SimSimi chatbot ─────────
+    SIMSIMI_API_KEY: str(env.SIMSIMI_API_KEY),        // official key from workshop.simsimi.com (best quality)
+    SIMI_LANG: str(env.SIMI_LANG, 'auto'),            // auto = detect language of each message
+    SIMI_BAD_WORDS: bool(env.SIMI_FILTER, true),      // ask SimSimi to filter rude answers (official API)
+    BRAINSHOP_BID: str(env.BRAINSHOP_BID),            // optional extra fallback (brainshop.ai)
+    BRAINSHOP_KEY: str(env.BRAINSHOP_KEY),
+
+    // ───────── pairing / session helpers ─────────
+    PAIR_TOKEN: str(env.PAIR_TOKEN),                  // optional password for the /pair web page
+    PRINT_SESSION: bool(env.PRINT_SESSION, false),    // print ASENA_SESSION in the logs after linking
+
+    // ───────── power features (off by default) ─────────
+    ALLOW_TERM: bool(env.ALLOW_TERM, false),          // enables .term (shell) for the account owner ONLY
+    BLOCK_CHAT: str(env.BLOCK_CHAT).split(',').map(s => s.trim()).filter(Boolean),
     TRANSLATE_LANG: str(env.TRANSLATE_LANG, 'en'),
     TTS_LANG: str(env.TTS_LANG, 'en'),
     YTDLP_PATH: str(env.YTDLP_PATH, 'yt-dlp'),
