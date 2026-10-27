@@ -3,7 +3,7 @@ const NodeCache = require('node-cache');
 const { isJidGroup } = require('@whiskeysockets/baileys');
 const config = require('./config');
 const { getCommands, getPassives } = require('./events');
-const { Sudo, Settings } = require('./db');
+const { Sudo, Settings, Blocked } = require('./db');
 const H = require('./helpers');
 
 const PREFIX_RE = new RegExp(config.HANDLERS);
@@ -13,6 +13,9 @@ const PUBLIC = new Set([
     'help', 'alive', 'ping', 'sticker', 'toimg', 'ttp', 'song', 'video', 'yt', 'dl',
     'wiki', 'weather', 'calc', 'unit', 'tts', 'trt', 'short', 'ss', 'meme', 'animepic',
     'currency', 'github', 'movie', 'locate', 'ocr',
+    // added in v3.1
+    'simi', 'covid', 'lyric', 'img', 'wallpaper', 'carbon', 'attp', 'detectlang', 'paste',
+    'trumpsay', 'changesay', 'animesay', 'textmaker',
 ]);// ignore stale messages (history sync / long downtime)
 
 let table = null;
@@ -61,7 +64,17 @@ async function processMessage(sock, msg) {
 
     if (H.unwrap(msg).protocolMessage) return;
 
+    // WhatsApp echoes our own replies back to us: never react to them (prevents endless loops).
+    // The tiny wait lets the sendMessage() wrapper register the id first.
+    if (msg.key.fromMe) {
+        await new Promise(r => setTimeout(r, 150));
+        if (H.wasSentByBot(msg.key.id)) return;
+    }
+
     const ctx = buildCtx(sock, msg);
+
+    // chats blocked with .blockchat (or BLOCK_CHAT env): only the owner can still use the bot there
+    if (!ctx.isOwner && (Blocked.has(jid) || config.BLOCK_CHAT.includes(jid))) return;
 
     if (config.SEND_READ && !ctx.fromMe) sock.readMessages([msg.key]).catch(() => {});
 
@@ -86,7 +99,7 @@ async function processMessage(sock, msg) {
 
         // permissions: owner/sudo-only commands, or "public" commands when mode is public
     const workType = Settings.get('workType', config.WORK_TYPE);
-    const isPublicCmd = o.fromMe === false || PUBLIC.has(cmd.names[0]);
+    const isPublicCmd = o.fromMe === false || o.public === true || PUBLIC.has(cmd.names[0]);
     if (!isPublicCmd) { if (!ctx.isOwner) return; }
     else if (!ctx.isOwner && workType !== 'public') return;
 

@@ -107,11 +107,35 @@ addCommand({ pattern: 'invite', onlyGroup: true, desc: 'Get the group invite lin
     await ctx.reply(`🔗 *Invite Link:*\nhttps://chat.whatsapp.com/${code}`);
 });
 
-addCommand({ pattern: 'ginfo', aliases: ['whois'], onlyGroup: true, desc: 'Show information about this group' }, async (sock, msg, match, ctx) => {
+
+// phone country codes -> flag + name (longest prefix wins)
+const CC = { '1': '🇺🇸 USA/Canada', '7': '🇷🇺 Russia/Kazakhstan', '20': '🇪🇬 Egypt', '27': '🇿🇦 South Africa', '31': '🇳🇱 Netherlands', '33': '🇫🇷 France', '34': '🇪🇸 Spain', '39': '🇮🇹 Italy',
+    '44': '🇬🇧 UK', '49': '🇩🇪 Germany', '52': '🇲🇽 Mexico', '55': '🇧🇷 Brazil', '60': '🇲🇾 Malaysia', '61': '🇦🇺 Australia', '62': '🇮🇩 Indonesia', '63': '🇵🇭 Philippines', '65': '🇸🇬 Singapore',
+    '66': '🇹🇭 Thailand', '81': '🇯🇵 Japan', '82': '🇰🇷 South Korea', '84': '🇻🇳 Vietnam', '86': '🇨🇳 China', '90': '🇹🇷 Turkey', '91': '🇮🇳 India', '92': '🇵🇰 Pakistan', '93': '🇦🇫 Afghanistan',
+    '94': '🇱🇰 Sri Lanka', '98': '🇮🇷 Iran', '212': '🇲🇦 Morocco', '213': '🇩🇿 Algeria', '234': '🇳🇬 Nigeria', '254': '🇰🇪 Kenya', '351': '🇵🇹 Portugal', '380': '🇺🇦 Ukraine', '880': '🇧🇩 Bangladesh',
+    '966': '🇸🇦 Saudi Arabia', '971': '🇦🇪 UAE', '972': '🇮🇱 Israel', '977': '🇳🇵 Nepal', '994': '🇦🇿 Azerbaijan' };
+
+function countryStats(participants) {
+    const counts = {};
+    for (const p of participants) {
+        const jid = [p.phoneNumber, p.jid, p.id].filter(Boolean).find(j => j.endsWith('@s.whatsapp.net'));
+        if (!jid) { counts['🌐 Hidden numbers'] = (counts['🌐 Hidden numbers'] || 0) + 1; continue; }
+        const n = H.num(jid);
+        const key = [3, 2, 1].map(l => n.slice(0, l)).find(c => CC[c]);
+        const name = key ? CC[key] : '🌍 Other';
+        counts[name] = (counts[name] || 0) + 1;
+    }
+    const rows = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 8);
+    return rows.length ? rows.map(([k, v]) => `${k}: ${v}`).join('\n') : '';
+}
+
+addCommand({ pattern: 'ginfo', aliases: ['whois'], onlyGroup: true, desc: 'Group info, with a members-by-country breakdown' }, async (sock, msg, match, ctx) => {
     const meta = await H.getGroupMeta(sock, ctx.jid, true);
     const admins = meta.participants.filter(p => p.admin);
     const created = meta.creation ? new Date(meta.creation * 1000).toLocaleDateString('en-GB') : 'unknown';
     let text = `👥 *${meta.subject}*\n\n*Members:* \`${meta.participants.length}\`\n*Admins:* \`${admins.length}\`\n*Created:* \`${created}\`\n*ID:* \`${meta.id}\`\n*Messages:* \`${meta.announce ? 'admins only' : 'everyone'}\``;
+    const countries = countryStats(meta.participants);
+    if (countries) text += `\n\n*Members by country:*\n${countries}`;
     if (meta.desc) text += `\n\n*Description:*\n${meta.desc}`;
     await ctx.reply(text);
 });

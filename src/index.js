@@ -14,30 +14,51 @@ const fs = require('fs');
 const path = require('path');
 
 const db = require('./db');
+const store = require('./store');
+const session = require('./session');
 const H = require('./helpers');
+const pairPage = require('./pairpage');
 const { getSocketHooks, setCategory } = require('./events');
 const { handleUpsert } = require('./handler');
-
-// ───────── never die on a stray error (24/7) ─────────
-process.on('unhandledRejection', (e) => console.error('⚠️  Unhandled rejection:', e?.message || e));
-process.on('uncaughtException', (e) => console.error('⚠️  Uncaught exception:', e?.stack || e));
-for (const sig of ['SIGINT', 'SIGTERM']) {
-    process.on(sig, () => {
-        console.log(`\n${sig} received, saving data and exiting...`);
-        try { db.flush(); } catch {}
-        try { S.sock?.end(undefined); } catch {}
-        process.exit(0);
-    });
-}
 
 // ───────── runtime state ─────────
 const S = {
     sock: null, connected: false, everOpen: false, lastChange: Date.now(),
     attempts: 0, starting: false, bootNotified: false,
     ignoreEnvSession: false, pairingRequested: false,
+    pairing: null,            // { code, at } - the code currently valid for linking
+    manualAt: 0, lastCodeReq: 0,
 };
 
-// ───────── health server (Render / uptime monitors) ─────────
+// ───────── never die on a stray error (24/7) ─────────
+process.on('unhandledRejection', (e) => console.error('⚠️  Unhandled rejection:', e?.message || e));
+process.on('uncaughtException', (e) => console.error('⚠️  Uncaught exception:', e?.stack || e));
+
+let shuttingDown = false;
+async function shutdown(sig) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`\n${sig} received, saving data and exiting...`);
+    try { await db.flushAsync(); } catch {}
+    try { await Promise.race([session.backupToStore(true), new Promise(r => setTimeout(r, 4000))]); } catch {}
+    try { S.sock?.end(undefined); } catch {}
+    process.exit(0);
+}
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => shutdown(sig));
+
+// ───────── pairing helper (used by the /pair page) ─────────
+async function requestNewCode() {
+    if (S.connected) return { ok: false, message: 'Already linked.' };
+    if (!config.PAIR_NUMBER) return { ok: false, message: 'PAIR_NUMBER is not set.' };
+    const wait = 15000 - (Date.now() - S.lastCodeReq);
+    if (wait > 0) return { ok: false, message: `Please wait ${Math.ceil(wait / 1000)}s before asking again.` };
+    S.lastCodeReq = Date.now();
+    S.pairing = null; S.pairingRequested = false; S.manualAt = Date.now();
+    try { S.sock?.end(new Error('new pairing code requested')); } catch {}
+    return { ok: true };
+}
+
+// ───────── health + pairing web server ─────────
 const app = express();
 app.get('/', (req, res) => res.send('SFL Bot is running!'));
 app.get('/health', (req, res) => {
@@ -45,7 +66,8 @@ app.get('/health', (req, res) => {
         connected: S.connected, uptime: Math.round(process.uptime()), version: config.VERSION,
     });
 });
-app.listen(config.PORT, '0.0.0.0', () => console.log(`🌐 Web server listening on port ${config.PORT}`));
+pairPage.mount(app, S, { requestNewCode });
+app.listen(config.PORT, '0.0.0.0', () => console.log(`🌐 Web server listening on port ${config.PORT}  (link page: /pair)`));
 
 if (config.KEEP_ALIVE_URL) {
     console.log(`⏰ Keep-alive ping enabled -> ${config.KEEP_ALIVE_URL}`);
@@ -60,38 +82,19 @@ setInterval(() => {
     }
 }, 60 * 1000).unref();
 
+// keep the remote session snapshot fresh (Signal keys change as messages flow)
+if (store.enabled) {
+    console.log('☁️  Remote storage enabled: session and data survive redeploys');
+    setInterval(() => { if (S.connected) session.backupToStore().catch(e => console.error('Session backup failed:', e.message)); }, 5 * 60 * 1000).unref();
+}
+
 // ───────── plugins ─────────
 const pluginDir = path.join(__dirname, 'plugins');
-const CATEGORY_NAMES = {
-    'admin.js': 'Group Admin', 'antilink.js': 'Group Admin', 'greetings.js': 'Group Admin', 'tagall.js': 'Group Admin',
-    'alive.js': 'Bot', 'owner.js': 'Bot', 'help.js': 'Bot', 'general.js': 'Utilities', 'web.js': 'Web & Fun',
-    'sticker.js': 'Media', 'media.js': 'Media', 'ttp.js': 'Media', 'downloader.js': 'Downloaders',
-    'afk.js': 'Chat', 'filters.js': 'Chat', 'notes.js': 'Chat', 'clear.js': 'Chat', 'presence.js': 'Profile',
-    'profile.js': 'Profile', 'autobio.js': 'Profile',
-};
+const CATEGORY_NAMES = require('./categories');
 for (const file of fs.readdirSync(pluginDir).sort()) {
     if (!file.endsWith('.js')) continue;
     setCategory(CATEGORY_NAMES[file] || file.replace(/\.js$/, '').replace(/^./, c => c.toUpperCase()));
     try { require(path.join(pluginDir, file)); } catch (e) { console.error(`❌ Plugin ${file} failed to load:`, e.message); }
-}
-
-// ───────── session restore from env ─────────
-function restoreSessionFromEnv(credsPath) {
-    if (fs.existsSync(credsPath) || !config.SESSION || S.ignoreEnvSession) return;
-    if (/^ASENA/i.test(config.SESSION)) {
-        console.log('❌ ASENA_SESSION looks like an OLD WhatsAsena session. Old sessions do not work with the new');
-        console.log('   WhatsApp library. Leave it empty and link again (QR or PAIR_NUMBER).');
-        return;
-    }
-    try {
-        const json = Buffer.from(config.SESSION, 'base64').toString('utf-8');
-        const parsed = JSON.parse(json);
-        if (!parsed.noiseKey) throw new Error('not a Baileys creds.json');
-        fs.writeFileSync(credsPath, json);
-        console.log('🔑 Session restored from ASENA_SESSION');
-    } catch (e) {
-        console.log('❌ ASENA_SESSION is invalid (' + e.message + '). Run `npm run session` after logging in to get a valid one.');
-    }
 }
 
 // ───────── main connection ─────────
@@ -106,7 +109,9 @@ async function startBot() {
     S.starting = true;
     try {
         fs.mkdirSync(config.SESSION_DIR, { recursive: true });
-        restoreSessionFromEnv(path.join(config.SESSION_DIR, 'creds.json'));
+        // order: local folder > remote storage > ASENA_SESSION env
+        if (!session.hasLocal()) await session.restoreFromStore();
+        if (!session.hasLocal() && !S.ignoreEnvSession) session.restoreFromEnv();
 
         const { state: auth, saveCreds } = await useMultiFileAuthState(config.SESSION_DIR);
         const { version } = await fetchLatestBaileysVersion().catch(() => ({}));
@@ -132,11 +137,18 @@ async function startBot() {
         const origSend = sock.sendMessage.bind(sock);
         sock.sendMessage = async (...args) => {
             const res = await origSend(...args);
-            if (res?.key?.id && res.message) msgStore.set(res.key.id, res.message);
+            if (res?.key?.id) { H.markSent(res.key.id); if (res.message) msgStore.set(res.key.id, res.message); }
             return res;
         };
 
-        sock.ev.on('creds.update', () => { Promise.resolve(saveCreds()).catch(e => console.error('Failed to save creds:', e.message)); });
+        let backupTimer = null;
+        sock.ev.on('creds.update', () => {
+            Promise.resolve(saveCreds()).catch(e => console.error('Failed to save creds:', e.message));
+            if (store.enabled && auth.creds.registered) {
+                clearTimeout(backupTimer);
+                backupTimer = setTimeout(() => session.backupToStore().catch(e => console.error('Session backup failed:', e.message)), 20000);
+            }
+        });
 
         sock.ev.on('messages.upsert', (u) => {
             if (!live()) return;
@@ -159,30 +171,40 @@ async function startBot() {
                         S.pairingRequested = true;
                         try {
                             const code = await sock.requestPairingCode(config.PAIR_NUMBER);
-                            console.log(`\n🔗 Pairing code: ${code?.match(/.{1,4}/g)?.join('-') || code}`);
-                            console.log('   WhatsApp > Linked Devices > Link a Device > "Link with phone number instead"\n');
+                            S.pairing = { code: String(code), at: Date.now() };
+                            const pretty = code?.match(/.{1,4}/g)?.join('-') || code;
+                            console.log(`\n🔗 [${new Date().toISOString()}] Pairing code: ${pretty}   (valid for about 1 minute)`);
+                            console.log('   Phone: WhatsApp > Linked Devices > Link a Device > "Link with phone number instead"');
+                            console.log('   Tip: open /pair on your bot URL to always see the newest code.\n');
                         } catch (e) {
                             S.pairingRequested = false;
                             console.log('❌ Could not get a pairing code:', e.message);
                         }
                     }
-                } else {
+                } else if (!config.PAIR_NUMBER) {
                     qrcode.generate(qr, { small: true });
                     console.log('\n✅ Scan the QR code above: WhatsApp > Linked Devices > Link a Device\n');
                 }
             }
 
             if (connection === 'open') {
-                S.connected = true; S.everOpen = true; S.attempts = 0; S.lastChange = Date.now();
+                S.connected = true; S.everOpen = true; S.attempts = 0; S.lastChange = Date.now(); S.pairing = null;
                 console.log(`\n✅ SFL Bot connected! [${config.VERSION}]  Mode: ${db.Settings.get('workType', config.WORK_TYPE)} | Prefix: ${config.PREFIX_CHARS}\n`);
+
+                if (config.PRINT_SESSION && !config.SESSION) {
+                    setTimeout(() => { const b = session.exportBase64(); if (b) console.log('ASENA_SESSION=' + b); }, 5000);
+                }
+                if (store.enabled) setTimeout(() => session.backupToStore(true).catch(() => {}), 15000);
 
                 if (config.BOOT_MESSAGE && !S.bootNotified) {
                     S.bootNotified = true;
                     const me = H.bare(sock.user.id);
                     const p = config.PREFIX;
-                    sock.sendMessage(me, {
-                        text: `✅ *SFL Bot is now Online!*\n\n*Version:* \`${config.VERSION}\`\n*Mode:* \`${db.Settings.get('workType', config.WORK_TYPE)}\`\n*Prefix:* \`${p}\`\n\nUse \`${p}help\` to see the list of commands.`,
-                    }).catch(() => {});
+                    let text = `✅ *SFL Bot is now Online!*\n\n*Version:* \`${config.VERSION}\`\n*Mode:* \`${db.Settings.get('workType', config.WORK_TYPE)}\`\n*Prefix:* \`${p}\`\n\nUse \`${p}help\` to see the list of commands.`;
+                    if (process.env.RENDER && !config.SESSION && !store.enabled) {
+                        text += `\n\n⚠️ _This host wipes its disk on restart. Send \`${p}session\` once and save the result as the ASENA_SESSION variable, or set UPSTASH_REDIS_REST_URL/TOKEN so I remember the login by myself._`;
+                    }
+                    sock.sendMessage(me, { text }).catch(() => {});
                 }
             }
 
@@ -190,12 +212,19 @@ async function startBot() {
                 S.connected = false; S.lastChange = Date.now();
                 const code = lastDisconnect?.error?.output?.statusCode;
                 const reason = Object.entries(DisconnectReason).find(([, v]) => v === code)?.[0] || 'unknown';
+
+                if (Date.now() - S.manualAt < 8000) {      // we closed it ourselves to make a fresh pairing code
+                    S.manualAt = 0;
+                    console.log('🔄 Restarting connection for a fresh pairing code...');
+                    return scheduleRestart(300);
+                }
                 console.log(`⚠️  Connection closed (code ${code}: ${reason}).`);
 
                 if (code === DisconnectReason.loggedOut) {
-                    console.log('❌ Logged out from WhatsApp. Clearing session; link the device again (QR / PAIR_NUMBER).');
+                    console.log('❌ Logged out from WhatsApp. Clearing session; link the device again (pairing code / QR).');
                     fs.rmSync(config.SESSION_DIR, { recursive: true, force: true });
-                    S.ignoreEnvSession = true; S.attempts = 0;
+                    await session.clearRemote();
+                    S.ignoreEnvSession = true; S.attempts = 0; S.pairing = null;
                     return scheduleRestart(3000);
                 }
                 if (code === DisconnectReason.connectionReplaced) {
@@ -216,7 +245,10 @@ async function startBot() {
 }
 
 console.log(`🤖 Starting SFL Bot ${config.VERSION}...`);
-startBot().catch(err => {
+(async () => {
+    await db.init();            // pulls data.json from remote storage when configured
+    await startBot();
+})().catch(err => {
     console.error('Fatal error on start:', err);
     scheduleRestart(10000);
 });

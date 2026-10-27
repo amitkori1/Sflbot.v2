@@ -2,11 +2,13 @@ const { addCommand } = require('../events');
 const config = require('../config');
 const db = require('../db');
 const H = require('../helpers');
+const session = require('../session');
 
 addCommand({ pattern: 'restart', desc: 'Restart the bot (needs PM2 / Docker / systemd to come back up)' }, async (sock, msg, match, ctx) => {
     await ctx.reply('♻️ Restarting...');
-    db.flush();
-    setTimeout(() => process.exit(0), 1000);
+    await db.flushAsync();
+    try { await session.backupToStore(true); } catch {}
+    setTimeout(() => process.exit(0), 500);
 });
 
 addCommand({

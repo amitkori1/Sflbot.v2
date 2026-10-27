@@ -10,8 +10,15 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
+const dns = require('dns').promises;
+const net = require('net');
 
 const silentLogger = pino({ level: 'silent' });
+
+// ids of messages THIS bot sent: WhatsApp echoes them back as incoming events, and we must never react to them
+const sentIds = new NodeCache({ stdTTL: 900, useClones: false });
+const markSent = (id) => { if (id) sentIds.set(id, 1); };
+const wasSentByBot = (id) => sentIds.has(id);
 
 // ───────── formatting / ids ─────────
 function secondsToHms(d) {
@@ -185,7 +192,61 @@ async function fetchBuffer(url, opts = {}) {
     return Buffer.from(data);
 }
 
+// ───────── safe downloads (SSRF protection) ─────────
+// A public command that fetches a user-supplied link must never reach the server's own network.
+function isPrivateIp(ip) {
+    if (net.isIPv6(ip)) {
+        const l = ip.toLowerCase();
+        if (l === '::1' || l === '::') return true;
+        const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(l);
+        if (mapped) return isPrivateIp(mapped[1]);
+        return /^f[cd]/.test(l) || /^fe[89ab]/.test(l);
+    }
+    const [a, b] = ip.split('.').map(Number);
+    return a === 0 || a === 10 || a === 127 || a >= 224
+        || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+}
+
+async function assertPublicUrl(link) {
+    let url;
+    try { url = new URL(link); } catch { throw new Error('That is not a valid link.'); }
+    if (!/^https?:$/.test(url.protocol)) throw new Error('Only http/https links are allowed.');
+    const host = url.hostname.replace(/^\[|\]$/g, '');
+    const addrs = net.isIP(host) ? [{ address: host }] : await dns.lookup(host, { all: true }).catch(() => { throw new Error('Could not resolve that address.'); });
+    if (!addrs.length || addrs.some(a => isPrivateIp(a.address))) throw new Error('That address is not allowed.');
+    return url.toString();
+}
+
+/** GET a public URL into memory: follows up to 4 redirects (each one re-checked) and stops at maxBytes. */
+async function safeGetBuffer(link, { maxBytes = 60 * 1024 * 1024, timeout = 45000, headers = {} } = {}) {
+    let current = link;
+    for (let hop = 0; hop < 5; hop++) {
+        await assertPublicUrl(current);
+        const res = await axios.get(current, {
+            responseType: 'stream', timeout, maxRedirects: 0, validateStatus: () => true,
+            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SFLBot/3.1)', ...headers },
+        });
+        if (res.status >= 300 && res.status < 400 && res.headers.location) {
+            res.data.destroy();
+            current = new URL(res.headers.location, current).toString();
+            continue;
+        }
+        if (res.status >= 400) { res.data.destroy(); throw new Error(`The server answered ${res.status}.`); }
+        const declared = Number(res.headers['content-length'] || 0);
+        if (declared > maxBytes) { res.data.destroy(); throw new Error('That file is too large.'); }
+        const chunks = []; let size = 0;
+        await new Promise((resolve, reject) => {
+            res.data.on('data', (c) => { size += c.length; if (size > maxBytes) { res.data.destroy(); reject(new Error('That file is too large.')); } else chunks.push(c); });
+            res.data.on('end', resolve); res.data.on('error', reject);
+        });
+        return { buffer: Buffer.concat(chunks), contentType: String(res.headers['content-type'] || '').split(';')[0].trim().toLowerCase(), url: current };
+    }
+    throw new Error('Too many redirects.');
+}
+
 module.exports = {
+    isPrivateIp, assertPublicUrl, safeGetBuffer,
+    markSent, wasSentByBot,
     silentLogger, secondsToHms, bare, num, jidToPhone, getBotIds,
     unwrap, getText, getContext, getQuoted, getQuotedText, mediaTypeOf,
     downloadMedia, getMedia,
